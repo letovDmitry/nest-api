@@ -1,63 +1,107 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "src/prisma/prisma.service";
 import { AuthDto } from "./dto";
-import * as argon from 'argon2'
-import { JwtService } from '@nestjs/jwt';
+import * as argon from "argon2";
+import { JwtService } from "@nestjs/jwt";
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime";
 import { ForbiddenException } from "@nestjs/common/exceptions";
 import { ConfigService } from "@nestjs/config";
+import { generatePassword } from "./helpers/generatePassword";
+import { sendMail } from "./helpers/mail";
 
 @Injectable()
 export class AuthService {
-    constructor(private prisma: PrismaService, private jwt: JwtService, private config: ConfigService) {}
+  constructor(
+    private prisma: PrismaService,
+    private jwt: JwtService,
+    private config: ConfigService
+  ) {}
 
-    async signup(dto: AuthDto) {
-        const hash = await argon.hash(dto.password)
+  async recoverPassword(dto: AuthDto) {
+    const password = generatePassword();
+    const hash = await argon.hash(password);
 
-        try {
-            const user = await this.prisma.user.create({
-                data: {
-                    email: dto.email,
-                    hash,
-                }
-            })
-    
-            return this.signToken(user.id, user.email)
-        } catch (e) {
-            if (e instanceof PrismaClientKnownRequestError) {
-                if (e.code === 'P2002') throw new ForbiddenException('Credentials taken')
-            }
+    try {
+      const user = await this.prisma.user.update({
+        where: {
+          email: dto.email,
+        },
+        data: {
+          hash,
         }
+      });
+
+      await sendMail(password, dto.email);
+
+      console.log(password);
+
+      return this.signToken(user.id, user.email, user.isBooster);
+    } catch (e) {
+      throw new ForbiddenException("This email does not exist");
     }
+  }
 
-    async signin(dto: AuthDto) {
-        const user = await this.prisma.user.findUnique({
-            where: {
-                email: dto.email
-            }
-        })
+  async signup(dto: AuthDto) {
+    const password = generatePassword();
+    const hash = await argon.hash(password);
 
-        if (!user) throw new ForbiddenException('Credentials incorrect')
+    try {
+      const user = await this.prisma.user.create({
+        data: {
+          email: dto.email,
+          isBooster: dto.isBooster,
+          hash,
+        },
+      });
 
-        const pwMatches = await argon.verify(user.hash, dto.password)
+      await sendMail(password, dto.email);
 
-        if (!pwMatches) throw new ForbiddenException('Credentials incorrect')
+      console.log(password);
 
-        return this.signToken(user.id, user.email)
-
+      return this.signToken(user.id, user.email, user.isBooster);
+    } catch (e) {
+      if (e instanceof PrismaClientKnownRequestError) {
+        if (e.code === "P2002")
+          throw new ForbiddenException("Credentials taken");
+      }
     }
+  }
 
-    async signToken(userId: number, email: string): Promise<{ access_token: string }> {
-        const payload = {
-            sub: userId,
-            email
-        }
+  async signin(dto: AuthDto) {
+    const user = await this.prisma.user.findUnique({
+      where: {
+        email: dto.email,
+      },
+    });
 
-        const secret = this.config.get<string>('JWT_SECRET')
-        const token = await this.jwt.signAsync(payload, {expiresIn: '15m',secret})
+    if (!user) throw new ForbiddenException("Credentials incorrect");
 
-        return ({
-            access_token: token
-        })
-    }
+    const pwMatches = await argon.verify(user.hash, dto.password);
+
+    if (!pwMatches) throw new ForbiddenException("Credentials incorrect");
+
+    return this.signToken(user.id, user.email, user.isBooster);
+  }
+
+  async signToken(
+    userId: number,
+    email: string,
+    isBooster: boolean
+  ): Promise<{ access_token: string; isBooster: boolean }> {
+    const payload = {
+      sub: userId,
+      email,
+    };
+
+    const secret = this.config.get<string>("JWT_SECRET");
+    const token = await this.jwt.signAsync(payload, {
+      expiresIn: "24h",
+      secret,
+    });
+
+    return {
+      access_token: token,
+      isBooster,
+    };
+  }
 }
